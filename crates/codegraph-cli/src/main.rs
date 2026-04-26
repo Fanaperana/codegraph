@@ -1,8 +1,11 @@
+#![allow(clippy::format_in_format_args)]
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
+use colored::{ColoredString, Colorize};
 use tracing::info;
 
 use codegraph_core::Config;
@@ -76,6 +79,72 @@ enum Commands {
     Schema,
 }
 
+/// Colorize an entity kind label.
+fn kind_color(kind: &str) -> ColoredString {
+    match kind {
+        "Function" | "Method" | "Constructor" => kind.bright_green(),
+        "Struct" | "Class" | "Interface" | "Enum" | "Union" | "TypeAlias" | "Typedef" => {
+            kind.bright_yellow()
+        }
+        "Trait" | "Impl" => kind.magenta(),
+        "Module" | "Namespace" | "File" | "Header" => kind.bright_blue(),
+        "Constant" | "Static" | "Variable" | "Property" => kind.cyan(),
+        "Macro" | "Decorator" | "Preprocessor" => kind.bright_magenta(),
+        "HtmlElement" | "CssRule" | "CssSelector" => kind.bright_cyan(),
+        _ => kind.white(),
+    }
+}
+
+/// Colorize a relevance score from red (low) to green (high).
+fn relevance_color(score: f64) -> ColoredString {
+    let formatted = format!("{score:.3}");
+    if score >= 0.85 {
+        formatted.bright_green().bold()
+    } else if score >= 0.70 {
+        formatted.green()
+    } else if score >= 0.50 {
+        formatted.yellow()
+    } else {
+        formatted.red()
+    }
+}
+
+/// Colorize a relationship type.
+fn rel_color(rel: &str) -> ColoredString {
+    match rel {
+        "CALLS" => rel.bright_green(),
+        "CONTAINS" => rel.dimmed(),
+        "IMPORTS" | "DEPENDS_ON" => rel.bright_blue(),
+        "USES_TYPE" | "RETURNS" | "ACCEPTS_PARAM" => rel.cyan(),
+        "IMPLEMENTS" | "EXTENDS" | "IMPL_FOR" => rel.magenta(),
+        _ => rel.white(),
+    }
+}
+
+/// Direction arrow + color.
+fn direction_arrow(direction: &str) -> ColoredString {
+    match direction {
+        "in" => "<-".bright_red(),
+        "out" => "->".bright_green(),
+        _ => "--".dimmed(),
+    }
+}
+
+/// Format a qualified name by splitting "path::ident" so the trailing
+/// identifier stands out against the dimmed module path.
+fn format_qname(qname: &str) -> String {
+    if let Some(idx) = qname.rfind("::") {
+        let (path, ident) = (&qname[..idx + 2], &qname[idx + 2..]);
+        format!("{}{}", path.dimmed(), ident.bold())
+    } else {
+        qname.bold().to_string()
+    }
+}
+
+fn header(text: &str) -> String {
+    text.bright_white().bold().underline().to_string()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -114,7 +183,11 @@ fn cmd_init() -> anyhow::Result<()> {
         anyhow::bail!("codegraph.toml already exists");
     }
     std::fs::write(&path, Config::default_toml())?;
-    println!("Created codegraph.toml");
+    println!(
+        "{} Created {}",
+        "✓".bright_green().bold(),
+        "codegraph.toml".bright_cyan().bold()
+    );
     Ok(())
 }
 
@@ -177,15 +250,18 @@ async fn cmd_index(cli: &Cli, path: &PathBuf, _full: bool) -> anyhow::Result<()>
     let current_hashes: HashSet<String> = entities.iter().map(|e| e.source_hash.clone()).collect();
     let deleted = store.delete_stale(&current_hashes).await?;
 
+    let stale_msg = if deleted > 0 {
+        format!(", removed {deleted} stale").yellow().to_string()
+    } else {
+        String::new()
+    };
     println!(
-        "Indexed {} entities, {} relationships{}",
-        entities.len(),
-        graph.relationships.len(),
-        if deleted > 0 {
-            format!(", removed {deleted} stale")
-        } else {
-            String::new()
-        }
+        "{} {} {}, {}{}",
+        "✓".bright_green().bold(),
+        "Indexed".bright_white().bold(),
+        format!("{} entities", entities.len()).bright_cyan(),
+        format!("{} relationships", graph.relationships.len()).bright_cyan(),
+        stale_msg
     );
 
     Ok(())
@@ -205,29 +281,33 @@ async fn cmd_search(cli: &Cli, query: &str, top_k: usize) -> anyhow::Result<()> 
         }
         OutputFormat::Text => {
             if results.is_empty() {
-                println!("No results found.");
+                println!("{}", "No results found.".yellow());
                 return Ok(());
             }
+            println!(
+                "{} {} {}",
+                header("Search results for"),
+                format!("\"{query}\"").bright_cyan(),
+                format!("({} matches)", results.len()).dimmed()
+            );
+            println!();
             for (i, result) in results.iter().enumerate() {
                 println!(
-                    "{}. {} [{}] (relevance: {:.3})",
-                    i + 1,
-                    result.qualified_name,
-                    result.kind,
-                    result.relevance
+                    "{} {}  {}  {} {}",
+                    format!("{:>2}.", i + 1).bright_white().bold(),
+                    format_qname(&result.qualified_name),
+                    format!("[{}]", kind_color(&result.kind)),
+                    "relevance:".dimmed(),
+                    relevance_color(result.relevance)
                 );
                 if !result.related.is_empty() {
                     for rel in &result.related {
                         println!(
-                            "   {} {} [{}] ({})",
-                            match rel.direction.as_str() {
-                                "in" => "<-",
-                                "out" => "->",
-                                _ => "--",
-                            },
-                            rel.qualified_name,
-                            rel.kind,
-                            rel.relationship
+                            "      {} {}  {}  {}",
+                            direction_arrow(&rel.direction),
+                            format_qname(&rel.qualified_name),
+                            format!("[{}]", kind_color(&rel.kind)),
+                            rel_color(&rel.relationship)
                         );
                     }
                 }
@@ -251,47 +331,78 @@ async fn cmd_explain(cli: &Cli, entity: &str) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&ctx)?);
         }
         OutputFormat::Text => {
-            println!("Entity: {} [{}]", ctx.qualified_name, ctx.kind);
+            println!(
+                "{} {}  {}",
+                header("Entity"),
+                format_qname(&ctx.qualified_name),
+                format!("[{}]", kind_color(&ctx.kind))
+            );
             println!();
 
             if !ctx.callers.is_empty() {
-                println!("Called by:");
+                println!("{}", header("Called by"));
                 for c in &ctx.callers {
-                    println!("  <- {} [{}]", c.qualified_name, c.kind);
+                    println!(
+                        "  {} {}  {}",
+                        "<-".bright_red(),
+                        format_qname(&c.qualified_name),
+                        format!("[{}]", kind_color(&c.kind))
+                    );
                 }
                 println!();
             }
 
             if !ctx.callees.is_empty() {
-                println!("Calls:");
+                println!("{}", header("Calls"));
                 for c in &ctx.callees {
-                    println!("  -> {} [{}]", c.qualified_name, c.kind);
+                    println!(
+                        "  {} {}  {}",
+                        "->".bright_green(),
+                        format_qname(&c.qualified_name),
+                        format!("[{}]", kind_color(&c.kind))
+                    );
                 }
                 println!();
             }
 
             if !ctx.dependencies.is_empty() {
-                println!("Depends on:");
+                println!("{}", header("Depends on"));
                 for d in &ctx.dependencies {
-                    println!("  -> {} [{}] ({})", d.qualified_name, d.kind, d.relationship);
+                    println!(
+                        "  {} {}  {}  {}",
+                        "->".bright_green(),
+                        format_qname(&d.qualified_name),
+                        format!("[{}]", kind_color(&d.kind)),
+                        rel_color(&d.relationship)
+                    );
                 }
                 println!();
             }
 
             if !ctx.dependents.is_empty() {
-                println!("Depended on by:");
+                println!("{}", header("Depended on by"));
                 for d in &ctx.dependents {
-                    println!("  <- {} [{}] ({})", d.qualified_name, d.kind, d.relationship);
+                    println!(
+                        "  {} {}  {}  {}",
+                        "<-".bright_red(),
+                        format_qname(&d.qualified_name),
+                        format!("[{}]", kind_color(&d.kind)),
+                        rel_color(&d.relationship)
+                    );
                 }
                 println!();
             }
 
             if !ctx.similar.is_empty() {
-                println!("Similar entities:");
+                println!("{}", header("Similar entities"));
                 for s in &ctx.similar {
                     println!(
-                        "  ~ {} [{}] (relevance: {:.3})",
-                        s.qualified_name, s.kind, s.relevance
+                        "  {} {}  {}  {} {}",
+                        "~".bright_magenta(),
+                        format_qname(&s.qualified_name),
+                        format!("[{}]", kind_color(&s.kind)),
+                        "relevance:".dimmed(),
+                        relevance_color(s.relevance)
                     );
                 }
             }
@@ -315,15 +426,31 @@ async fn cmd_path(cli: &Cli, from: &str, to: &str) -> anyhow::Result<()> {
         }
         OutputFormat::Text => {
             if path.is_empty() {
-                println!("No path found between {from} and {to}");
+                println!(
+                    "{} {} {} {}",
+                    "No path found between".yellow(),
+                    from.bold(),
+                    "and".yellow(),
+                    to.bold()
+                );
                 return Ok(());
             }
-            println!("Path ({} hops):", path.len() - 1);
+            println!(
+                "{} {}",
+                header("Path"),
+                format!("({} hops)", path.len() - 1).dimmed()
+            );
             for (i, node) in path.iter().enumerate() {
                 if i > 0 {
-                    println!("  |");
+                    println!("    {}", "│".dimmed());
+                    println!("    {}", "▼".bright_blue());
                 }
-                println!("  {} [{}]", node.qualified_name, node.kind);
+                println!(
+                    "  {} {}  {}",
+                    "●".bright_blue(),
+                    format_qname(&node.qualified_name),
+                    format!("[{}]", kind_color(&node.kind))
+                );
             }
         }
     }
@@ -342,15 +469,25 @@ async fn cmd_schema(cli: &Cli) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&stats)?);
         }
         OutputFormat::Text => {
-            println!("Graph Statistics:");
-            println!("{:-<40}", "");
+            println!("{}", header("Graph Statistics"));
+            let rule = "─".repeat(40).dimmed();
+            println!("{rule}");
             let mut total = 0i64;
             for (label, count) in &stats {
-                println!("  {label:<20} {count:>8}");
+                let count_str = if *count == 0 {
+                    format!("{count:>8}").dimmed()
+                } else {
+                    format!("{count:>8}").bright_white().bold()
+                };
+                println!("  {:<22} {}", kind_color(label), count_str);
                 total += count;
             }
-            println!("{:-<40}", "");
-            println!("  {:<20} {:>8}", "Total", total);
+            println!("{rule}");
+            println!(
+                "  {:<22} {}",
+                "Total".bright_white().bold(),
+                format!("{total:>8}").bright_cyan().bold()
+            );
         }
     }
 
