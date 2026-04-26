@@ -1,0 +1,38 @@
+# codegraph configuration
+
+[neo4j]
+uri = "bolt://localhost:7687"
+username = "neo4j"
+password = "codegraph"
+database = "neo4j"
+max_connections = 10
+
+[indexing]
+# Paths to index (relative to where codegraph is run)
+paths = ["."]
+# Glob patterns to exclude
+exclude = ["target/**", "node_modules/**", ".git/**", "vendor/**"]
+# Whether to compute embeddings during indexing
+embed = true
+# Batch size for Neo4j upserts
+batch_size = 500
+
+[embedding]
+# Provider: "openai" or "local"
+provider = "openai"
+
+# Dimension of embedding vectors
+# all-MiniLM-L6-v2
+# dimensions = 384
+
+# all-mpnet-base-v2
+dimensions = 768
+
+[embedding.openai]
+model = "text-embedding-3-small"
+# API key read from OPENAI_API_KEY env var
+
+[embedding.local]
+# model_path = "models/all-MiniLM-L6-v2.onnx"
+model_path = "models/all-mpnet-base-v2.onnx"
+tokenizer_path = "models/tokenizer.json"

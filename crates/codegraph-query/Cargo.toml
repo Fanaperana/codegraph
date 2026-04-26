@@ -1,0 +1,13 @@
+[package]
+name = "codegraph-query"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+codegraph-core.workspace = true
+codegraph-graph.workspace = true
+codegraph-embed.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
