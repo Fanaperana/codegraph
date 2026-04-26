@@ -19,7 +19,7 @@ batch_size = 500
 
 [embedding]
 # Provider: "openai", "local", or "none"
-provider = "none"
+provider = "local"
 
 # Dimension of embedding vectors
 # all-MiniLM-L6-v2

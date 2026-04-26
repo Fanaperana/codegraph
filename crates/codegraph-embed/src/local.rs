@@ -41,25 +41,16 @@ impl LocalProvider {
                 .map_err(|e| Error::Embedding(format!("Tokenization failed: {e}")))?;
 
             let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
-            let attention_mask: Vec<i64> = encoding
-                .get_attention_mask()
-                .iter()
-                .map(|&m| m as i64)
-                .collect();
-            let token_type_ids: Vec<i64> = encoding
-                .get_type_ids()
-                .iter()
-                .map(|&t| t as i64)
-                .collect();
+            let attention_mask_u32 = encoding.get_attention_mask().to_vec();
+            let attention_mask: Vec<i64> =
+                attention_mask_u32.iter().map(|&m| m as i64).collect();
 
             let seq_len = input_ids.len();
             let shape = vec![1i64, seq_len as i64];
 
             let input_ids_tensor = Tensor::from_array((shape.clone(), input_ids))
                 .map_err(|e| Error::Embedding(format!("Tensor error: {e}")))?;
-            let attention_mask_tensor = Tensor::from_array((shape.clone(), attention_mask))
-                .map_err(|e| Error::Embedding(format!("Tensor error: {e}")))?;
-            let token_type_ids_tensor = Tensor::from_array((shape, token_type_ids))
+            let attention_mask_tensor = Tensor::from_array((shape, attention_mask))
                 .map_err(|e| Error::Embedding(format!("Tensor error: {e}")))?;
 
             let mut session_guard = self
@@ -71,18 +62,35 @@ impl LocalProvider {
                 .run(ort::inputs![
                     "input_ids" => input_ids_tensor,
                     "attention_mask" => attention_mask_tensor,
-                    "token_type_ids" => token_type_ids_tensor,
                 ])
                 .map_err(|e| Error::Embedding(format!("Inference failed: {e}")))?;
 
-            // Extract the [CLS] token embedding (first token of last_hidden_state)
-            // try_extract_tensor returns (&Shape, &[f32])
+            // last_hidden_state has shape [1, seq_len, dims], flattened.
             let (_shape, data) = outputs[0]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| Error::Embedding(format!("Output extraction failed: {e}")))?;
 
-            // data is flattened [1, seq_len, dims] — take first dims elements for [CLS]
-            let embedding: Vec<f32> = data[..self.dimensions].to_vec();
+            // Mean pooling weighted by attention mask, as used by
+            // sentence-transformers/all-mpnet-base-v2.
+            let dims = self.dimensions;
+            let mut pooled = vec![0f32; dims];
+            let mut mask_sum: f32 = 0.0;
+            for (token_idx, &mask) in attention_mask_u32.iter().enumerate() {
+                if mask == 0 {
+                    continue;
+                }
+                let offset = token_idx * dims;
+                for d in 0..dims {
+                    pooled[d] += data[offset + d];
+                }
+                mask_sum += 1.0;
+            }
+            if mask_sum > 0.0 {
+                for v in &mut pooled {
+                    *v /= mask_sum;
+                }
+            }
+            let embedding = pooled;
             drop(outputs);
             drop(session_guard);
 
