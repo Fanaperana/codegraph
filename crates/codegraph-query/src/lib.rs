@@ -78,20 +78,34 @@ impl<'a> HybridEngine<'a> {
             .await?;
         let query_embedding = &embeddings[0];
 
-        // Step 2: Vector search across embeddable entity types
-        let labels = ["Function", "Method", "Struct", "Enum", "Trait", "Module"];
+        // Detect whether the embedder produced a meaningful vector. The Noop
+        // provider returns all zeros, in which case vector search is useless
+        // and we fall back to text-based name matching.
+        let has_vector = query_embedding.iter().any(|&x| x != 0.0);
+
         let mut vector_results = Vec::new();
 
-        for label in labels {
-            match self
-                .store
-                .query_vector(query_embedding, label, top_k)
-                .await
-            {
-                Ok(results) => vector_results.extend(results),
-                Err(e) => {
-                    debug!("Vector search for {label} failed (index may not exist): {e}");
+        if has_vector {
+            // Step 2a: Vector search across embeddable entity types
+            let labels = ["Function", "Method", "Struct", "Enum", "Trait", "Module"];
+            for label in labels {
+                match self
+                    .store
+                    .query_vector(query_embedding, label, top_k)
+                    .await
+                {
+                    Ok(results) => vector_results.extend(results),
+                    Err(e) => {
+                        debug!("Vector search for {label} failed (index may not exist): {e}");
+                    }
                 }
+            }
+        } else {
+            // Step 2b: Fallback — text search by name/qualified_name
+            debug!("No embedding available; falling back to name search");
+            match self.store.query_by_name(query_text, top_k).await {
+                Ok(results) => vector_results.extend(results),
+                Err(e) => debug!("Name search failed: {e}"),
             }
         }
 
@@ -246,14 +260,18 @@ impl<'a> HybridEngine<'a> {
         // Find similar entities via vector search
         let similar = self.search(qualified_name, 5).await.unwrap_or_default();
 
-        // Determine the kind from neighbors query (entity might not be in the results)
-        let kind = self
-            .store
-            .query_neighbors(qualified_name, 0, "both")
-            .await
-            .ok()
-            .and_then(|n| n.first().map(|r| r.kind.clone()))
-            .unwrap_or_else(|| "Unknown".into());
+        // Determine the kind by looking up the entity directly. Fall back to
+        // neighbor inspection if it's not present (e.g. wrong qualified name).
+        let kind = match self.store.get_entity(qualified_name).await {
+            Ok(Some(entity)) => entity.kind,
+            _ => self
+                .store
+                .query_neighbors(qualified_name, 1, "both")
+                .await
+                .ok()
+                .and_then(|n| n.first().map(|r| r.kind.clone()))
+                .unwrap_or_else(|| "Unknown".into()),
+        };
 
         let name = qualified_name
             .rsplit("::")

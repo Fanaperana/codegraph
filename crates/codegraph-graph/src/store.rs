@@ -332,6 +332,23 @@ impl GraphStore {
         queries::graph_stats(&self.graph).await
     }
 
+    /// Look up a single entity by qualified_name.
+    pub async fn get_entity(
+        &self,
+        qualified_name: &str,
+    ) -> Result<Option<queries::VectorResult>> {
+        queries::get_entity(&self.graph, qualified_name).await
+    }
+
+    /// Text-based search over entity names (fallback when vectors unavailable).
+    pub async fn query_by_name(
+        &self,
+        text: &str,
+        top_k: usize,
+    ) -> Result<Vec<queries::VectorResult>> {
+        queries::query_by_name(&self.graph, text, top_k).await
+    }
+
     /// Get the underlying Neo4j graph handle.
     pub fn inner(&self) -> &Graph {
         &self.graph

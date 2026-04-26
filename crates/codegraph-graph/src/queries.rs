@@ -165,6 +165,78 @@ pub async fn shortest_path(
     }
 }
 
+/// Look up a single entity by qualified_name. Returns None if not found.
+pub async fn get_entity(graph: &Graph, qualified_name: &str) -> Result<Option<VectorResult>> {
+    let cypher = r#"
+        MATCH (n {qualified_name: $qn})
+        RETURN n.name AS name,
+               n.qualified_name AS qualified_name,
+               labels(n)[0] AS kind
+        LIMIT 1
+    "#;
+
+    let mut result = graph
+        .execute(query(cypher).param("qn", qualified_name))
+        .await
+        .map_err(|e| Error::Neo4j(e.to_string()))?;
+
+    if let Some(row) = result.next().await.map_err(|e| Error::Neo4j(e.to_string()))? {
+        Ok(Some(VectorResult {
+            name: row.get("name").unwrap_or_default(),
+            qualified_name: row.get("qualified_name").unwrap_or_default(),
+            kind: row.get("kind").unwrap_or_default(),
+            score: 1.0,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Text-based search over entity names and qualified names (case-insensitive substring match).
+/// Used as a fallback when vector search is unavailable (e.g. provider = "none").
+pub async fn query_by_name(
+    graph: &Graph,
+    text: &str,
+    top_k: usize,
+) -> Result<Vec<VectorResult>> {
+    let cypher = r#"
+        MATCH (n)
+        WHERE (n.name IS NOT NULL AND toLower(n.name) CONTAINS toLower($text))
+           OR (n.qualified_name IS NOT NULL AND toLower(n.qualified_name) CONTAINS toLower($text))
+        RETURN n.name AS name,
+               n.qualified_name AS qualified_name,
+               labels(n)[0] AS kind,
+               CASE
+                 WHEN toLower(n.name) = toLower($text) THEN 1.0
+                 WHEN toLower(n.name) STARTS WITH toLower($text) THEN 0.8
+                 ELSE 0.5
+               END AS score
+        ORDER BY score DESC, n.qualified_name ASC
+        LIMIT $topk
+    "#;
+
+    let mut result = graph
+        .execute(
+            query(cypher)
+                .param("text", text)
+                .param("topk", top_k as i64),
+        )
+        .await
+        .map_err(|e| Error::Neo4j(e.to_string()))?;
+
+    let mut results = Vec::new();
+    while let Some(row) = result.next().await.map_err(|e| Error::Neo4j(e.to_string()))? {
+        results.push(VectorResult {
+            name: row.get("name").unwrap_or_default(),
+            qualified_name: row.get("qualified_name").unwrap_or_default(),
+            kind: row.get("kind").unwrap_or_default(),
+            score: row.get("score").unwrap_or_default(),
+        });
+    }
+
+    Ok(results)
+}
+
 /// Get statistics about the graph.
 pub async fn graph_stats(graph: &Graph) -> Result<Vec<(String, i64)>> {
     let cypher = r#"
