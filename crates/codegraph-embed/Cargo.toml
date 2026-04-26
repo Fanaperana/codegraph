@@ -5,7 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [features]
-default = ["openai"]
+default = ["openai", "local"]
 openai = ["dep:async-openai"]
 local = ["dep:ort", "dep:tokenizers"]
 

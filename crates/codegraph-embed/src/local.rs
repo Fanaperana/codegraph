@@ -1,39 +1,37 @@
 use std::path::Path;
+use std::sync::Mutex;
 
 use codegraph_core::Result;
 use codegraph_core::error::Error;
+use ort::session::Session;
+use ort::value::Tensor;
 use tracing::debug;
 
 pub struct LocalProvider {
-    session: ort::session::Session,
+    session: Mutex<Session>,
     tokenizer: tokenizers::Tokenizer,
     pub dimensions: usize,
 }
 
 impl LocalProvider {
     pub fn new(model_path: &str, tokenizer_path: &str) -> Result<Self> {
-        let session = ort::session::Session::builder()
-            .and_then(|b| b.with_model_from_file(Path::new(model_path)))
+        let session = Session::builder()
+            .and_then(|mut b| b.commit_from_file(Path::new(model_path)))
             .map_err(|e| Error::Embedding(format!("Failed to load ONNX model: {e}")))?;
 
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| Error::Embedding(format!("Failed to load tokenizer: {e}")))?;
 
-        // Infer dimensions from model output shape or default to 384 (MiniLM)
-        // let dimensions = 384;
-        
-        // all-mpnet-base-v2 produces 768-dimensional embeddings
         let dimensions = 768;
 
         Ok(Self {
-            session,
+            session: Mutex::new(session),
             tokenizer,
             dimensions,
         })
     }
 
     pub async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        // Run inference on a blocking thread since ONNX runtime is synchronous
         let mut results = Vec::with_capacity(texts.len());
 
         for text in texts {
@@ -55,34 +53,38 @@ impl LocalProvider {
                 .collect();
 
             let seq_len = input_ids.len();
+            let shape = vec![1i64, seq_len as i64];
 
-            let input_ids_array =
-                ndarray::Array2::from_shape_vec((1, seq_len), input_ids)
-                    .map_err(|e| Error::Embedding(format!("Array shape error: {e}")))?;
-            let attention_mask_array =
-                ndarray::Array2::from_shape_vec((1, seq_len), attention_mask)
-                    .map_err(|e| Error::Embedding(format!("Array shape error: {e}")))?;
-            let token_type_ids_array =
-                ndarray::Array2::from_shape_vec((1, seq_len), token_type_ids)
-                    .map_err(|e| Error::Embedding(format!("Array shape error: {e}")))?;
+            let input_ids_tensor = Tensor::from_array((shape.clone(), input_ids))
+                .map_err(|e| Error::Embedding(format!("Tensor error: {e}")))?;
+            let attention_mask_tensor = Tensor::from_array((shape.clone(), attention_mask))
+                .map_err(|e| Error::Embedding(format!("Tensor error: {e}")))?;
+            let token_type_ids_tensor = Tensor::from_array((shape, token_type_ids))
+                .map_err(|e| Error::Embedding(format!("Tensor error: {e}")))?;
 
-            let outputs = self
+            let mut session_guard = self
                 .session
+                .lock()
+                .map_err(|e| Error::Embedding(format!("Session lock error: {e}")))?;
+
+            let outputs = session_guard
                 .run(ort::inputs![
-                    "input_ids" => input_ids_array,
-                    "attention_mask" => attention_mask_array,
-                    "token_type_ids" => token_type_ids_array,
-                ].map_err(|e| Error::Embedding(format!("Input error: {e}")))?)
+                    "input_ids" => input_ids_tensor,
+                    "attention_mask" => attention_mask_tensor,
+                    "token_type_ids" => token_type_ids_tensor,
+                ])
                 .map_err(|e| Error::Embedding(format!("Inference failed: {e}")))?;
 
             // Extract the [CLS] token embedding (first token of last_hidden_state)
-            let output_tensor = outputs[0]
+            // try_extract_tensor returns (&Shape, &[f32])
+            let (_shape, data) = outputs[0]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| Error::Embedding(format!("Output extraction failed: {e}")))?;
 
-            let embedding: Vec<f32> = output_tensor
-                .slice(ndarray::s![0, 0, ..])
-                .to_vec();
+            // data is flattened [1, seq_len, dims] — take first dims elements for [CLS]
+            let embedding: Vec<f32> = data[..self.dimensions].to_vec();
+            drop(outputs);
+            drop(session_guard);
 
             // L2 normalize
             let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
